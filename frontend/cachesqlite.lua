@@ -40,8 +40,6 @@ function CacheSQLite:new(o)
     return o
 end
 
-local is_connected = false
-
 function CacheSQLite:init()
     if self.db_path == ":memory:" and self.auto_close == true then
         logger.warn("CacheSQLite: using in-memory database, forcing auto_close = false")
@@ -61,14 +59,7 @@ function CacheSQLite:init()
     ]]
 
     -- Initialize size tracking
-    self.current_size = self.db:rowexec([[
-        SELECT
-            ROUND(page_count * page_size, 0) as db_size_bytes,
-            ROUND((page_count - freelist_count) * page_size, 0) as data_size_bytes
-        FROM pragma_page_count(),
-            pragma_page_size(),
-            pragma_freelist_count();
-    ]]) or 0
+    self.current_size = self.db:rowexec("SELECT SUM(size) FROM cache") or 0
     logger.dbg("CacheSQLite:", self.db_path, "current size:", self.current_size)
     self:closeDB()
 
@@ -78,9 +69,8 @@ end
 --- Opens the SQLite database.
 --- This is normally done internally, but can be called manually if needed.
 function CacheSQLite:openDB()
-    if not is_connected then
+    if not self.db then
         self.db = SQ3.open(self.db_path)
-        is_connected = true
     end
 end
 
@@ -88,9 +78,9 @@ end
 --- This is normally done internally, but can be called manually if needed.
 --- @param[opt=false] explicit boolean When auto_close is false, this must be set to true to close the DB.
 function CacheSQLite:closeDB(explicit)
-    if is_connected and (self.auto_close or explicit) then
+    if self.db and (self.auto_close or explicit) then
         self.db:close()
-        is_connected = false
+        self.db = nil
     end
 end
 
@@ -98,7 +88,7 @@ end
 --- This is normally done internally, but can be called manually if needed.
 --- @return boolean
 function CacheSQLite:isConnected()
-    return is_connected
+    return self.db ~= nil
 end
 
 --- Inserts an object into the cache.
@@ -106,7 +96,6 @@ end
 --- @param object any
 --- @return boolean success, number size
 function CacheSQLite:insert(key, object)
-    self:openDB()
     local codec = Persist.getCodec(self.codec)
     local size
     object, size = codec.serialize(object)
@@ -122,32 +111,34 @@ function CacheSQLite:insert(key, object)
         return false, 0
     end
 
-    -- Ensure we have enough space by removing old entries
-    while self.current_size + size > self.size do
-        local oldest = self.db:rowexec([[
-            SELECT key, size FROM cache
-            ORDER BY last_access ASC LIMIT 1
-        ]])
-        if oldest then
-            self:remove(oldest[1])
-        else
-            break
-        end
-    end
-
-    local stmt = self.db:prepare([[
-        INSERT OR REPLACE INTO cache (key, value, size, last_access)
-        VALUES (?, ?, ?, ?);
-    ]])
+    self:openDB()
     local ok, err = pcall(function()
+        local old_stmt = self.db:prepare("SELECT size FROM cache WHERE key = ?")
+        local old_row = old_stmt:bind(key):step()
+        local stmt = self.db:prepare([[
+            INSERT OR REPLACE INTO cache (key, value, size, last_access)
+            VALUES (?, ?, ?, ?);
+        ]])
         stmt:reset():bind(key, object, size, UIManager:getTime()):step()
+        self.current_size = self.current_size + size - (old_row and old_row[1] or 0)
+
+        -- Evict on the same connection: remove() would close it when auto_close is enabled.
+        while self.current_size > self.size do
+            local oldest_key, oldest_size = self.db:rowexec([[
+                SELECT key, size FROM cache
+                ORDER BY last_access ASC LIMIT 1
+            ]])
+            if not oldest_key then break end
+            local delete_stmt = self.db:prepare("DELETE FROM cache WHERE key = ?")
+            delete_stmt:bind(oldest_key):step()
+            self.current_size = self.current_size - oldest_size
+        end
     end)
     if not ok and err then
         err = err:gsub("\n.*", "") -- remove stacktrace
         logger.err("CacheSQLite:insert() failed:", err)
     end
 
-    self.current_size = self.current_size + size
     self:closeDB()
     return ok, size
 end
@@ -189,9 +180,9 @@ function CacheSQLite:remove(key)
     local stmt = self.db:prepare("SELECT size FROM cache WHERE key = ?")
     local row = stmt:reset():bind(key):step()
     if row then
-        self.current_size = self.current_size - row[1]
         local delete_stmt = self.db:prepare("DELETE FROM cache WHERE key = ?")
         delete_stmt:reset():bind(key):step()
+        self.current_size = self.current_size - row[1]
     end
     self:closeDB()
 end
