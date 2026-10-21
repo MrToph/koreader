@@ -159,6 +159,35 @@ describe("NewsDownloader module", function()
     end)
 
     describe("Special case handling", function()
+        it("should accept empty RSS feeds", function()
+            local empty_rss = [[
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0">
+<channel>
+  <title>Empty Feed</title>
+  <link>https://example.com</link>
+  <description>No articles available</description>
+</channel>
+</rss>
+]]
+            local DownloadBackend = require("epubdownloadbackend")
+            local getCache = stub(DownloadBackend, "getCache", function()
+                return { check = function() end }
+            end)
+            local getResponse = stub(DownloadBackend, "getResponseAsString", function()
+                return "application/rss+xml", empty_rss
+            end)
+            finally(function()
+                getCache:revert()
+                getResponse:revert()
+            end)
+
+            local unsupported_feeds = {}
+            NewsDownloader:processFeedSource("https://example.com/rss", nil, nil, 0, unsupported_feeds)
+
+            assert.same({}, unsupported_feeds)
+        end)
+
         it("should handle single-item RSS feeds properly", function()
             local single_item_rss = [[
 <?xml version="1.0" encoding="UTF-8" ?>

@@ -564,7 +564,9 @@ function NewsDownloader:processFeedSource(url, credentials, http_auth, limit, un
 
     -- Check to see if the feed uses RSS.
     local is_rss = false
-    if feeds.rss and feeds.rss.channel and feeds.rss.channel.title and feeds.rss.channel.item then
+    if feeds.rss and feeds.rss.channel and feeds.rss.channel.title then
+        -- Empty feeds are valid and have nothing to download.
+        if feeds.rss.channel.item == nil then return end
         if type(feeds.rss.channel.item) == "table" then
             -- Normalize data for single-item feeds.
             if not feeds.rss.channel.item[1] and feeds.rss.channel.item then
@@ -580,7 +582,8 @@ function NewsDownloader:processFeedSource(url, credentials, http_auth, limit, un
 
     -- Check to see if the feed uses Atom.
     local is_atom = false
-    if feeds.feed and feeds.feed.title and feeds.feed.entry then
+    if feeds.feed and feeds.feed.title then
+        if feeds.feed.entry == nil then return end
         if type(feeds.feed.entry) == "table" then
             -- Normalize data for single-item feeds.
             if not feeds.feed.entry[1] and feeds.feed.entry then
